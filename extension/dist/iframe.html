@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      overflow: hidden;
+      font-family: monospace;
+      color: #fff;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    #overlay {
+      background: rgba(0, 0, 0, 0.85);
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 16px;
+      font-size: 11px;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      backdrop-filter: blur(10px);
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+    .title-row {
+      margin-bottom: 8px;
+    }
+    #mb-status {
+      font-weight: bold;
+    }
+    .label-small {
+      font-size: 9px;
+      color: #aaa;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .bar-bg {
+      height: 6px;
+      width: 100%;
+      background: #222;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    #mb-trust-bar {
+      height: 100%;
+      width: 100%;
+      background: #4ade80;
+      transition: width 0.3s, background 0.3s;
+    }
+    #error-container {
+      color: #ef4444;
+      font-size: 10px;
+      margin-top: 4px;
+    }
+    /* Controls */
+    .controls {
+      display: flex;
+      gap: 6px;
+      margin-top: 10px;
+      margin-bottom: 10px;
+    }
+    button {
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #fff;
+      padding: 4px 8px;
+      font-size: 9px;
+      text-transform: uppercase;
+      border-radius: 4px;
+      cursor: pointer;
+      flex: 1;
+      font-family: monospace;
+    }
+    button:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
+    /* Alerts */
+    #alerts-feed {
+      flex: 1;
+      overflow-y: auto;
+      border: 1px solid #333;
+      border-radius: 4px;
+      background: rgba(0,0,0,0.5);
+      padding: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .alert-item {
+      font-size: 9px;
+      padding: 4px;
+      border-radius: 2px;
+      background: rgba(255,255,255,0.05);
+    }
+    .alert-warn { border-left: 2px solid #f59e0b; }
+    .alert-crit { border-left: 2px solid #ef4444; }
+    
+    /* Settings Panel */
+    #settings-panel {
+      display: none;
+      position: absolute;
+      top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0, 0, 0, 0.95);
+      border-radius: 8px;
+      padding: 16px;
+      flex-direction: column;
+      z-index: 10;
+    }
+    .input-group {
+      margin-bottom: 8px;
+    }
+    .input-group label {
+      display: block;
+      font-size: 9px;
+      color: #aaa;
+      margin-bottom: 2px;
+    }
+    .input-group input {
+      width: 100%;
+      background: transparent;
+      border: 1px solid #555;
+      color: #fff;
+      padding: 4px;
+      font-family: monospace;
+      font-size: 10px;
+      border-radius: 2px;
+    }
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-thumb { background: #555; border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <!-- Main View -->
+  <div id="overlay">
+    <div class="row title-row">
+      <strong style="color: #4ade80;">MIRRORBREAKER</strong>
+      <span id="mb-status">INIT</span>
+    </div>
+    
+    <div class="row">
+      <span>rPPG Pulse:</span>
+      <span id="mb-bpm">--</span>
+    </div>
+    <div class="row">
+      <span>Blink Rate:</span>
+      <span id="mb-blink">--</span>
+    </div>
+    <div class="row">
+      <span>Lip-Sync Drift:</span>
+      <span id="mb-lipsync">--</span>
+    </div>
+
+    <div style="margin-top: 8px;">
+      <div class="label-small">TRUST INDEX</div>
+      <div class="bar-bg">
+        <div id="mb-trust-bar"></div>
+      </div>
+    </div>
+    
+    <div id="error-container"></div>
+
+    <div class="controls">
+      <button id="btn-settings">Settings</button>
+      <button id="btn-export">Export</button>
+    </div>
+
+    <div class="label-small">LIVE ALERTS</div>
+    <div id="alerts-feed">
+      <!-- Alerts go here -->
+    </div>
+  </div>
+
+  <!-- Settings View -->
+  <div id="settings-panel">
+    <div class="row title-row">
+      <strong>TUNING PARAMETERS</strong>
+    </div>
+    
+    <div class="input-group">
+      <label>Min Blink Rate (/min)</label>
+      <input type="number" id="cfg-blink-low" value="4">
+    </div>
+    <div class="input-group">
+      <label>Max Blink Rate (/min)</label>
+      <input type="number" id="cfg-blink-high" value="45">
+    </div>
+    <div class="input-group">
+      <label>Lip-Sync Drift Max</label>
+      <input type="number" step="0.05" id="cfg-lipsync" value="0.55">
+    </div>
+    <div class="input-group">
+      <label>rPPG Confidence Min</label>
+      <input type="number" step="0.05" id="cfg-rppg" value="0.15">
+    </div>
+    
+    <div style="margin-top: auto; display: flex; gap: 6px;">
+      <button id="btn-settings-cancel">Cancel</button>
+      <button id="btn-settings-save" style="background: rgba(74, 222, 128, 0.2); border-color: #4ade80;">Save</button>
+    </div>
+  </div>
+
+  <script src="iframe.js"></script>
+</body>
+</html>

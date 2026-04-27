@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "MirrorBreaker",
+  "version": "1.0",
+  "description": "Real-time deepfake defense for Google Meet and Zoom.",
+  "permissions": ["activeTab", "microphone"],
+  "content_scripts": [
+    {
+      "matches": ["*://meet.google.com/*", "*://app.zoom.us/*", "*://*.zoom.us/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*", "iframe.html"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  }
+}

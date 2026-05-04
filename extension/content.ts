@@ -3,6 +3,7 @@ let targetVideo: HTMLVideoElement | null = null;
 let sampleCanvas: HTMLCanvasElement | null = null;
 let rafId: number | null = null;
 let iframeEl: HTMLIFrameElement | null = null;
+let iframeReady = false;
 
 // Popup UI State
 let popupEl: HTMLDivElement | null = null;
@@ -56,6 +57,10 @@ function showMassivePopup(level: string) {
 }
 
 window.addEventListener("message", (e) => {
+  if (e.data && e.data.type === "IFRAME_READY") {
+    console.log("[MirrorBreaker] Iframe signal received: READY");
+    iframeReady = true;
+  }
   if (e.data && e.data.type === "THREAT_LEVEL") {
     showMassivePopup(e.data.level);
   }
@@ -100,7 +105,11 @@ function analyzeFrame() {
 
   if (!targetVideo || targetVideo.readyState < 2 || targetVideo.paused) {
     targetVideo = findTargetVideo();
-    if (!targetVideo) return;
+    if (!targetVideo) {
+      if (Math.random() < 0.01) console.log("[MirrorBreaker] Waiting for active video stream...");
+      return;
+    }
+    console.log("[MirrorBreaker] Target video acquired:", targetVideo.videoWidth, "x", targetVideo.videoHeight);
   }
 
   const aspect = targetVideo.videoWidth / targetVideo.videoHeight;
@@ -119,17 +128,19 @@ function analyzeFrame() {
   const imageData = ctx.getImageData(0, 0, w, h);
   const now = performance.now();
 
-  iframeEl.contentWindow.postMessage(
-    {
-      type: "FRAME",
-      imageData: imageData.data.buffer,
-      width: w,
-      height: h,
-      timestamp: now,
-    },
-    "*",
-    [imageData.data.buffer]
-  );
+  if (iframeReady) {
+    iframeEl.contentWindow.postMessage(
+      {
+        type: "FRAME",
+        imageData: imageData.data.buffer,
+        width: w,
+        height: h,
+        timestamp: now,
+      },
+      "*",
+      [imageData.data.buffer]
+    );
+  }
 }
 
 async function start() {

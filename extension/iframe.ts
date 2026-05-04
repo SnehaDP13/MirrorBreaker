@@ -34,7 +34,7 @@ const audioSeries = new TimeSeries(LIPSYNC_WINDOW_MS);
 let blinkTimes: number[] = [];
 let blinkState = false;
 let recentEarMax = 0.25;
-const trustEMA = new EMA(0.05);
+const trustEMA = new EMA(0.18); // Faster reaction (~200ms at 30fps)
 
 const noseSeriesX = new TimeSeries(4000);
 const noseSeriesY = new TimeSeries(4000);
@@ -45,6 +45,7 @@ let analyser: AnalyserNode | null = null;
 let audioDataArray: Uint8Array | null = null;
 
 // Session State
+let isProcessing = false;
 const sessionStartTime = Date.now();
 let maxThreatScore = 0;
 let allAlerts: any[] = [];
@@ -207,16 +208,27 @@ async function initModel() {
       outputFacialTransformationMatrixes: false,
     });
     updateOverlay(0, 0, 0, 50, "READY");
+    window.parent.postMessage({ type: "IFRAME_READY" }, "*");
     console.log("[MirrorBreaker] Model loaded inside iframe.");
   } catch (err: any) {
     showError(err.message || String(err));
   }
 }
 
-window.addEventListener("message", (event) => {
-  if (event.data && event.data.type === "FRAME" && landmarker) {
-    const { imageData, width, height, timestamp } = event.data;
-    analyzeFrame(new ImageData(new Uint8ClampedArray(imageData), width, height), width, height, timestamp);
+window.addEventListener("message", async (event) => {
+  if (isProcessing || !landmarker) return;
+  if (event.data && event.data.type === "FRAME") {
+    isProcessing = true;
+    try {
+      const { imageData, width, height, timestamp } = event.data;
+      // Use synchronous ImageData constructor as it's fast
+      const img = new ImageData(new Uint8ClampedArray(imageData), width, height);
+      analyzeFrame(img, width, height, timestamp);
+    } catch (err) {
+      console.error("[MirrorBreaker] Frame processing error:", err);
+    } finally {
+      isProcessing = false;
+    }
   }
 });
 
@@ -253,15 +265,17 @@ function analyzeFrame(imageData: ImageData, w: number, h: number, now: number) {
       const endX = Math.min(w, startX + Math.floor(foreheadBox.w));
       const endY = Math.min(h, startY + Math.floor(foreheadBox.h));
 
-      for (let y = startY; y < endY; y++) {
-        for (let x = startX; x < endX; x++) {
-          const idx = (y * w + x) * 4;
+      for (let y = startY; y < endY; y += 2) { // Subsample by 2 for speed
+        const rowOffset = (y * w) * 4;
+        for (let x = startX; x < endX; x += 2) {
+          const idx = rowOffset + (x * 4);
           rSum += data[idx]; gSum += data[idx + 1]; bSum += data[idx + 2]; count++;
         }
       }
       if (count > 0) {
         const rMean = rSum / count, gMean = gSum / count, bMean = bSum / count;
-        const chrom = 3 * rMean - 2 * gMean - (1.5 * gMean + 1.5 * bMean) / 2;
+        // Faster chrominance approximation
+        const chrom = (3 * rMean - 2 * gMean - (1.5 * gMean + 1.5 * bMean) * 0.5);
         const sample = gMean - 0.5 * (rMean + bMean) + chrom * 0.05;
         greenSeries.push(sample, now);
       }
@@ -409,4 +423,3 @@ function analyzeFrame(imageData: ImageData, w: number, h: number, now: number) {
 }
 
 initModel();
-initAudio(); // Ensure microphone is started on load

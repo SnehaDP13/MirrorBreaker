@@ -2,36 +2,60 @@
 // 478-point face mesh (with iris). See https://github.com/google/mediapipe.
 
 export const LEFT_EYE_EAR = {
-  // For Eye Aspect Ratio: P1..P6
-  p1: 33, // outer corner
-  p2: 160, // upper outer
-  p3: 158, // upper inner
-  p4: 133, // inner corner
-  p5: 153, // lower inner
-  p6: 144, // lower outer
+  // For Eye Aspect Ratio: P1..P6 (Soukupová & Čech 2016)
+  p1: 33, // outer corner (lateral canthus)
+  p2: 160, // upper outer lid
+  p3: 158, // upper inner lid
+  p4: 133, // inner corner (medial canthus)
+  p5: 153, // lower inner lid
+  p6: 144, // lower outer lid
 };
 
 export const RIGHT_EYE_EAR = {
-  p1: 263,
-  p2: 387,
-  p3: 385,
-  p4: 362,
-  p5: 380,
-  p6: 373,
+  p1: 263, // outer corner
+  p2: 387, // upper outer lid
+  p3: 385, // upper inner lid
+  p4: 362, // inner corner
+  p5: 380, // lower inner lid
+  p6: 373, // lower outer lid
 };
 
-// A patch of the forehead between the eyebrows, above the nose bridge.
-// Stable region with thin skin = strong rPPG signal.
-export const FOREHEAD_LANDMARKS = [10, 109, 67, 103, 54, 21, 162, 127, 234, 93, 132];
+// Forehead ROI for rPPG signal extraction.
+// CRITICAL: These MUST be actual forehead landmarks (between hairline and eyebrows).
+// Previous version included jaw/cheek points (127, 234, 93, 132) which corrupted
+// the rPPG signal with non-pulsatile skin regions.
+// These landmarks define the glabella + mid-forehead region — thin skin, minimal
+// movement artifact, strong pulsatile blood flow signal.
+export const FOREHEAD_LANDMARKS = [
+  10,  // top of forehead center
+  151, // mid forehead center
+  9,   // between eyebrows center
+  8,   // between eyebrows center (slightly lower)
+  107, // right inner forehead
+  336, // left inner forehead
+  66,  // right mid forehead
+  296, // left mid forehead
+  67,  // right forehead
+  297, // left forehead
+  103, // right upper forehead
+  332, // left upper forehead
+  69,  // right forehead edge
+  299, // left forehead edge
+];
+
 export const NOSE_TIP = 1;
 
 // Mouth outer ring for lip-sync analysis.
 export const MOUTH_OUTER = [61, 291, 78, 308, 13, 14, 17, 0];
+
 // Upper / lower lip vertical pairs to estimate mouth opening.
+// Using multiple pairs across the lip width for robust measurement.
 export const MOUTH_OPEN_PAIRS: Array<[number, number]> = [
-  [13, 14], // inner top/bottom
-  [12, 15], // mid
-  [11, 16],
+  [13, 14],   // inner center top/bottom (most reliable)
+  [12, 15],   // mid
+  [11, 16],   // outer-mid
+  [82, 87],   // right side inner
+  [312, 317], // left side inner
 ];
 
 export interface Pt {
@@ -81,11 +105,14 @@ export function landmarksBBox(
     if (px > maxX) maxX = px;
     if (py > maxY) maxY = py;
   }
+  // Pad the box slightly to capture full forehead region
+  const padX = (maxX - minX) * 0.1;
+  const padY = (maxY - minY) * 0.1;
   return {
-    x: Math.max(0, Math.floor(minX)),
-    y: Math.max(0, Math.floor(minY)),
-    w: Math.max(1, Math.ceil(maxX - minX)),
-    h: Math.max(1, Math.ceil(maxY - minY)),
+    x: Math.max(0, Math.floor(minX - padX)),
+    y: Math.max(0, Math.floor(minY - padY)),
+    w: Math.max(1, Math.ceil(maxX - minX + 2 * padX)),
+    h: Math.max(1, Math.ceil(maxY - minY + 2 * padY)),
   };
 }
 

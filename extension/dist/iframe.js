@@ -4069,7 +4069,7 @@
     }
     return s1 * s1 + s2 * s2 - coeff * s1 * s2;
   }
-  function estimateDominantFrequency(signal, sampleRate, fMin, fMax, steps = 60) {
+  function estimateDominantFrequency(signal, sampleRate, fMin, fMax, steps = 120) {
     if (signal.length < 32 || sampleRate <= 0) {
       return { freqHz: 0, power: 0, snr: 0 };
     }
@@ -4120,36 +4120,76 @@
 
   // src/lib/mirrorbreaker/landmarks.ts
   var LEFT_EYE_EAR = {
-    // For Eye Aspect Ratio: P1..P6
+    // For Eye Aspect Ratio: P1..P6 (Soukupová & Čech 2016)
     p1: 33,
-    // outer corner
+    // outer corner (lateral canthus)
     p2: 160,
-    // upper outer
+    // upper outer lid
     p3: 158,
-    // upper inner
+    // upper inner lid
     p4: 133,
-    // inner corner
+    // inner corner (medial canthus)
     p5: 153,
-    // lower inner
+    // lower inner lid
     p6: 144
-    // lower outer
+    // lower outer lid
   };
   var RIGHT_EYE_EAR = {
     p1: 263,
+    // outer corner
     p2: 387,
+    // upper outer lid
     p3: 385,
+    // upper inner lid
     p4: 362,
+    // inner corner
     p5: 380,
+    // lower inner lid
     p6: 373
+    // lower outer lid
   };
-  var FOREHEAD_LANDMARKS = [10, 109, 67, 103, 54, 21, 162, 127, 234, 93, 132];
+  var FOREHEAD_LANDMARKS = [
+    10,
+    // top of forehead center
+    151,
+    // mid forehead center
+    9,
+    // between eyebrows center
+    8,
+    // between eyebrows center (slightly lower)
+    107,
+    // right inner forehead
+    336,
+    // left inner forehead
+    66,
+    // right mid forehead
+    296,
+    // left mid forehead
+    67,
+    // right forehead
+    297,
+    // left forehead
+    103,
+    // right upper forehead
+    332,
+    // left upper forehead
+    69,
+    // right forehead edge
+    299
+    // left forehead edge
+  ];
   var NOSE_TIP = 1;
   var MOUTH_OPEN_PAIRS = [
     [13, 14],
-    // inner top/bottom
+    // inner center top/bottom (most reliable)
     [12, 15],
     // mid
-    [11, 16]
+    [11, 16],
+    // outer-mid
+    [82, 87],
+    // right side inner
+    [312, 317]
+    // left side inner
   ];
   function dist2D(a2, b2) {
     const dx = a2.x - b2.x;
@@ -4183,11 +4223,13 @@
       if (px > maxX) maxX = px;
       if (py > maxY) maxY = py;
     }
+    const padX = (maxX - minX) * 0.1;
+    const padY = (maxY - minY) * 0.1;
     return {
-      x: Math.max(0, Math.floor(minX)),
-      y: Math.max(0, Math.floor(minY)),
-      w: Math.max(1, Math.ceil(maxX - minX)),
-      h: Math.max(1, Math.ceil(maxY - minY))
+      x: Math.max(0, Math.floor(minX - padX)),
+      y: Math.max(0, Math.floor(minY - padY)),
+      w: Math.max(1, Math.ceil(maxX - minX + 2 * padX)),
+      h: Math.max(1, Math.ceil(maxY - minY + 2 * padY))
     };
   }
   function mouthOpenness(landmarks) {
@@ -4221,12 +4263,13 @@
   var blinkTimes = [];
   var blinkState = false;
   var recentEarMax = 0.25;
-  var trustEMA = new EMA(0.05);
+  var trustEMA = new EMA(0.18);
   var noseSeriesX = new TimeSeries(4e3);
   var noseSeriesY = new TimeSeries(4e3);
   var audioCtx = null;
   var analyser = null;
   var audioDataArray = null;
+  var isProcessing = false;
   var sessionStartTime = Date.now();
   var maxThreatScore = 0;
   var allAlerts = [];
@@ -4365,15 +4408,25 @@
         outputFacialTransformationMatrixes: false
       });
       updateOverlay(0, 0, 0, 50, "READY");
+      window.parent.postMessage({ type: "IFRAME_READY" }, "*");
       console.log("[MirrorBreaker] Model loaded inside iframe.");
     } catch (err) {
       showError(err.message || String(err));
     }
   }
-  window.addEventListener("message", (event) => {
-    if (event.data && event.data.type === "FRAME" && landmarker) {
-      const { imageData, width, height, timestamp } = event.data;
-      analyzeFrame(new ImageData(new Uint8ClampedArray(imageData), width, height), width, height, timestamp);
+  window.addEventListener("message", async (event) => {
+    if (isProcessing || !landmarker) return;
+    if (event.data && event.data.type === "FRAME") {
+      isProcessing = true;
+      try {
+        const { imageData, width, height, timestamp } = event.data;
+        const img = new ImageData(new Uint8ClampedArray(imageData), width, height);
+        analyzeFrame(img, width, height, timestamp);
+      } catch (err) {
+        console.error("[MirrorBreaker] Frame processing error:", err);
+      } finally {
+        isProcessing = false;
+      }
     }
   });
   function analyzeFrame(imageData, w2, h2, now) {
@@ -4406,9 +4459,10 @@
         const startY = Math.max(0, Math.floor(foreheadBox.y));
         const endX = Math.min(w2, startX + Math.floor(foreheadBox.w));
         const endY = Math.min(h2, startY + Math.floor(foreheadBox.h));
-        for (let y2 = startY; y2 < endY; y2++) {
-          for (let x2 = startX; x2 < endX; x2++) {
-            const idx = (y2 * w2 + x2) * 4;
+        for (let y2 = startY; y2 < endY; y2 += 2) {
+          const rowOffset = y2 * w2 * 4;
+          for (let x2 = startX; x2 < endX; x2 += 2) {
+            const idx = rowOffset + x2 * 4;
             rSum += data[idx];
             gSum += data[idx + 1];
             bSum += data[idx + 2];
@@ -4417,7 +4471,7 @@
         }
         if (count > 0) {
           const rMean = rSum / count, gMean = gSum / count, bMean = bSum / count;
-          const chrom = 3 * rMean - 2 * gMean - (1.5 * gMean + 1.5 * bMean) / 2;
+          const chrom = 3 * rMean - 2 * gMean - (1.5 * gMean + 1.5 * bMean) * 0.5;
           const sample = gMean - 0.5 * (rMean + bMean) + chrom * 0.05;
           greenSeries.push(sample, now);
         }
@@ -4532,5 +4586,4 @@
     window.parent.postMessage({ type: "THREAT_LEVEL", level: threatLevel }, "*");
   }
   initModel();
-  initAudio();
 })();

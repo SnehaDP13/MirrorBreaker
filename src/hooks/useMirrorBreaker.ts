@@ -8,6 +8,8 @@ import {
   TimeSeries,
   EMA,
   estimateDominantFrequency,
+  bandpassFilter,
+  crossCorrelation,
   std,
   clamp,
 } from "@/lib/mirrorbreaker/signal-utils";
@@ -68,6 +70,10 @@ const LIPSYNC_WINDOW_MS = 4_000;
 import { type TuningConfig, DEFAULT_CONFIG } from "@/components/mirrorbreaker/SettingsModal";
 
 export function useMirrorBreaker(config: TuningConfig = DEFAULT_CONFIG) {
+  // Keep a ref to config so the RAF loop always reads fresh values
+  const configRef = useRef(config);
+  configRef.current = config;
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const sampleCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -79,15 +85,21 @@ export function useMirrorBreaker(config: TuningConfig = DEFAULT_CONFIG) {
 
   // Signal buffers
   const greenSeries = useRef(new TimeSeries(RPPG_WINDOW_MS));
+  const redSeries = useRef(new TimeSeries(RPPG_WINDOW_MS));
+  const blueSeries = useRef(new TimeSeries(RPPG_WINDOW_MS));
   const earSeries = useRef(new TimeSeries(BLINK_WINDOW_MS));
   const mouthSeries = useRef(new TimeSeries(LIPSYNC_WINDOW_MS));
   const audioSeries = useRef(new TimeSeries(LIPSYNC_WINDOW_MS));
   const blinkTimes = useRef<number[]>([]);
   const blinkState = useRef(false);
-  const recentEarMax = useRef(0.25); // Dynamic blink baseline
+  const recentEarMax = useRef(0.3);
+  const recentEarMin = useRef(0.15); // Track min EAR for dynamic range
   const fpsEMA = useRef(new EMA(0.1));
-  const trustEMA = useRef(new EMA(0.05)); // 0.05 provides extreme temporal stability (anti-jitter)
+  const trustEMA = useRef(new EMA(0.12)); // ~200ms at 30fps
+  const bpmEMA = useRef(new EMA(0.15)); // Smooth BPM readings
   const lastFrame = useRef(0);
+  const lastUIUpdate = useRef(0);
+  const alertCountRef = useRef(0);
   
   // Head Pose tracking
   const noseSeriesX = useRef(new TimeSeries(4000));
@@ -180,6 +192,7 @@ export function useMirrorBreaker(config: TuningConfig = DEFAULT_CONFIG) {
     setSignals((s) => ({ ...s, running: true }));
     pushAlert("info", "BOOT", "Detection engine online. Calibrating signals…");
     loop();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [init, pushAlert]);
 
   const stop = useCallback(() => {
@@ -191,13 +204,17 @@ export function useMirrorBreaker(config: TuningConfig = DEFAULT_CONFIG) {
     audioCtxRef.current = null;
     analyserRef.current = null;
     greenSeries.current.clear();
+    redSeries.current.clear();
+    blueSeries.current.clear();
     earSeries.current.clear();
     mouthSeries.current.clear();
     audioSeries.current.clear();
     blinkTimes.current = [];
-    recentEarMax.current = 0.25;
+    recentEarMax.current = 0.3;
+    recentEarMin.current = 0.15;
     fpsEMA.current.reset();
     trustEMA.current.reset();
+    bpmEMA.current.reset();
     noseSeriesX.current.clear();
     noseSeriesY.current.clear();
     setSignals((s) => ({
@@ -273,58 +290,69 @@ export function useMirrorBreaker(config: TuningConfig = DEFAULT_CONFIG) {
           h: (mxY - mnY) * h,
         };
 
-        // Forehead patch -> rPPG
+        // ===== rPPG: Forehead ROI pixel extraction =====
         foreheadBox = landmarksBBox(landmarks, FOREHEAD_LANDMARKS, w, h);
         if (foreheadBox && foreheadBox.w > 4 && foreheadBox.h > 4) {
-          const img = ctx.getImageData(
-            foreheadBox.x,
-            foreheadBox.y,
-            foreheadBox.w,
-            foreheadBox.h,
-          );
-          let gSum = 0;
-          let rSum = 0;
-          let bSum = 0;
-          const px = img.data.length / 4;
-          for (let i = 0; i < img.data.length; i += 4) {
-            rSum += img.data[i];
-            gSum += img.data[i + 1];
-            bSum += img.data[i + 2];
+          // Clamp to canvas bounds
+          const fx = Math.max(0, Math.min(foreheadBox.x, w - 1));
+          const fy = Math.max(0, Math.min(foreheadBox.y, h - 1));
+          const fw = Math.min(foreheadBox.w, w - fx);
+          const fh = Math.min(foreheadBox.h, h - fy);
+          
+          if (fw > 2 && fh > 2) {
+            const img = ctx.getImageData(fx, fy, fw, fh);
+            let rSum = 0, gSum = 0, bSum = 0;
+            const px = img.data.length / 4;
+            for (let i = 0; i < img.data.length; i += 4) {
+              rSum += img.data[i];
+              gSum += img.data[i + 1];
+              bSum += img.data[i + 2];
+            }
+            const rMean = rSum / px;
+            const gMean = gSum / px;
+            const bMean = bSum / px;
+
+            // Store all three channels for proper CHROM algorithm
+            redSeries.current.push(rMean, now);
+            greenSeries.current.push(gMean, now);
+            blueSeries.current.push(bMean, now);
           }
-          const rMean = rSum / px;
-          const gMean = gSum / px;
-          const bMean = bSum / px;
-          // CHROM-style chrominance: emphasizes pulsatile component
-          const chrom = 3 * rMean - 2 * gMean - (1.5 * gMean + 1.5 * bMean) / 2;
-          // Use green-dominant signal — robust default
-          const sample = gMean - 0.5 * (rMean + bMean) + chrom * 0.05;
-          greenSeries.current.push(sample, now);
         }
 
-        // EAR -> blink
+        // ===== Blink Detection: EAR with adaptive thresholds =====
         const earL = eyeAspectRatio(landmarks, LEFT_EYE_EAR);
         const earR = eyeAspectRatio(landmarks, RIGHT_EYE_EAR);
         earCurrent = (earL + earR) / 2;
         earSeries.current.push(earCurrent, now);
         
-        // Dynamic Blink Baseline
+        // Adaptive baseline: track running max (open eyes) and min (closed eyes)
         if (earCurrent > recentEarMax.current) {
           recentEarMax.current = earCurrent;
         } else {
-          recentEarMax.current = recentEarMax.current * 0.999 + earCurrent * 0.001;
+          // Slow decay toward current value
+          recentEarMax.current = recentEarMax.current * 0.998 + earCurrent * 0.002;
+        }
+        if (earCurrent < recentEarMin.current) {
+          recentEarMin.current = earCurrent;
+        } else {
+          // Faster rise for min (we want it to track open-eye baseline)
+          recentEarMin.current = recentEarMin.current * 0.995 + earCurrent * 0.005;
         }
 
-        // Blink detection: Dynamic threshold at 75% of resting eye size
-        const BLINK_THRESH = recentEarMax.current * 0.75;
+        // Blink detection using 65% of dynamic range (more sensitive than 75%)
+        const earRange = recentEarMax.current - recentEarMin.current;
+        const BLINK_THRESH = recentEarMin.current + earRange * 0.35;
+        
         if (!blinkState.current && earCurrent < BLINK_THRESH) {
           blinkState.current = true;
           blinkTimes.current.push(now);
-          // prune
+          // prune old blinks
           const cutoff = now - BLINK_WINDOW_MS;
           while (blinkTimes.current.length && blinkTimes.current[0] < cutoff) {
             blinkTimes.current.shift();
           }
-        } else if (blinkState.current && earCurrent > BLINK_THRESH + 0.02) {
+        } else if (blinkState.current && earCurrent > BLINK_THRESH + earRange * 0.15) {
+          // Hysteresis: need to rise 15% of range above threshold to "un-blink"
           blinkState.current = false;
         }
 
@@ -336,11 +364,10 @@ export function useMirrorBreaker(config: TuningConfig = DEFAULT_CONFIG) {
         noseSeriesX.current.push(landmarks[NOSE_TIP].x, now);
         noseSeriesY.current.push(landmarks[NOSE_TIP].y, now);
       } else {
-        // No face — slowly clear blink state
         blinkState.current = false;
       }
 
-      // Audio RMS sample
+      // ===== Audio RMS sample =====
       let audioActive = false;
       const an = analyserRef.current;
       if (an) {
@@ -353,26 +380,59 @@ export function useMirrorBreaker(config: TuningConfig = DEFAULT_CONFIG) {
         }
         const rms = Math.sqrt(sum / arr.length);
         audioSeries.current.push(rms, now);
-        audioActive = rms > 0.02;
+        audioActive = rms > 0.015; // Lower threshold for better sensitivity
       }
 
       // ===== Derive metrics =====
 
-      // rPPG -> BPM
+      // rPPG -> BPM using proper CHROM algorithm
       let bpm = 0;
       let rppgConfidence = 0;
+      const rVals = redSeries.current.getValues();
       const gVals = greenSeries.current.getValues();
+      const bVals = blueSeries.current.getValues();
       const gFs = greenSeries.current.sampleRate();
-      if (gVals.length > 90 && gFs > 5) {
+      
+      if (gVals.length > 60 && gFs > 5) {
+        // CHROM algorithm (de Haan & Jeanne 2013):
+        // X = 3R - 2G, Y = 1.5R + G - 1.5B
+        // S = X - (std(X)/std(Y)) * Y
+        const N = Math.min(rVals.length, gVals.length, bVals.length);
+        const chromX: number[] = [];
+        const chromY: number[] = [];
+        for (let i = 0; i < N; i++) {
+          chromX.push(3 * rVals[i] - 2 * gVals[i]);
+          chromY.push(1.5 * rVals[i] + gVals[i] - 1.5 * bVals[i]);
+        }
+        
+        const stdX = std(chromX);
+        const stdY = std(chromY);
+        const alpha = stdY > 0.001 ? stdX / stdY : 1;
+        
+        const chromSignal: number[] = [];
+        for (let i = 0; i < N; i++) {
+          chromSignal.push(chromX[i] - alpha * chromY[i]);
+        }
+
+        // Apply bandpass filter (0.7-3.5 Hz = 42-210 BPM)
+        const filtered = bandpassFilter(chromSignal, gFs, 0.7, 3.5);
+        
         const { freqHz, snr } = estimateDominantFrequency(
-          gVals,
+          filtered,
           gFs,
-          0.7, // 42 bpm
-          3.5, // 210 bpm
-          80,
+          0.7,  // 42 bpm
+          3.5,  // 210 bpm
+          120,  // Fine resolution
         );
-        bpm = freqHz * 60;
-        rppgConfidence = clamp((snr - 1) / 8, 0, 1);
+        
+        const rawBpm = freqHz * 60;
+        // Smooth BPM to reduce jitter
+        if (rawBpm > 40 && rawBpm < 200) {
+          bpm = bpmEMA.current.update(rawBpm);
+        } else {
+          bpm = bpmEMA.current.get();
+        }
+        rppgConfidence = clamp((snr - 1.5) / 6, 0, 1);
       }
 
       // Blink rate per minute (extrapolated from window)
@@ -381,18 +441,17 @@ export function useMirrorBreaker(config: TuningConfig = DEFAULT_CONFIG) {
         now - (blinkTimes.current[0] ?? now),
       ) / 1000;
       const blinkRatePerMin =
-        blinkTimes.current.length > 0 && blinkWinSec > 2
+        blinkTimes.current.length > 0 && blinkWinSec > 3
           ? (blinkTimes.current.length / blinkWinSec) * 60
           : 0;
 
-      // Lip-sync drift: when audio is active, mouth movement should correlate with audio RMS.
+      // ===== Lip-sync drift with cross-correlation =====
       let lipSyncDrift = 0;
       const audVals = audioSeries.current.getValues();
       const mouthVals = mouthSeries.current.getValues();
       const audMean = audVals.reduce((s, v) => s + v, 0) / Math.max(1, audVals.length);
       
-      if (audMean > 0.03 && audVals.length > 30 && mouthVals.length > 30) {
-        // Resample to common length (use min length)
+      if (audMean > 0.02 && audVals.length > 30 && mouthVals.length > 30) {
         const N = Math.min(audVals.length, mouthVals.length, 120);
         const a = audVals.slice(-N);
         const m = mouthVals.slice(-N);
@@ -402,99 +461,81 @@ export function useMirrorBreaker(config: TuningConfig = DEFAULT_CONFIG) {
         
         // Ventriloquist Check: Loud audio but mouth is completely shut
         if (mouthVar < 0.005 && maxMouth < 0.06) {
-          lipSyncDrift = 0.95; // Ventriloquist attack!
+          lipSyncDrift = 0.95;
         } else {
-          // Envelope Smoothing
-          const aMax = Math.max(...a, 0.001);
-          const aNorm = a.map(v => v / aMax);
+          // Cross-correlation with lag compensation
+          // Allow up to 8 samples lag (~250ms at 30fps) for natural speech delay
+          const maxLag = Math.min(8, Math.floor(N / 4));
+          const { bestCorr } = crossCorrelation(a, m, maxLag);
           
-          const mMin = Math.min(...m);
-          const mMax = Math.max(...m, mMin + 0.001);
-          const mNorm = m.map(v => (v - mMin) / (mMax - mMin));
-          
-          const smooth = (arr: number[]) => {
-            const out = [];
-            for (let i = 0; i < arr.length; i++) {
-              let sum = 0, count = 0;
-              for (let j = Math.max(0, i - 2); j <= Math.min(arr.length - 1, i + 2); j++) {
-                sum += arr[j]; count++;
-              }
-              out.push(sum / count);
-            }
-            return out;
-          };
-          
-          const aSmooth = smooth(aNorm);
-          const mSmooth = smooth(mNorm);
-          
-          // RMSE between envelopes
-          let mse = 0;
-          for(let i=0; i<N; i++) {
-            const diff = aSmooth[i] - mSmooth[i];
-            mse += diff * diff;
-          }
-          const rmse = Math.sqrt(mse / N);
-          
-          // If rmse > 0.35, high drift. If rmse < 0.2, perfect sync.
-          lipSyncDrift = clamp((rmse - 0.2) * 2.0, 0, 1);
+          // High correlation = good sync, low/negative = drift
+          // bestCorr ranges from -1 to 1
+          // Map: corr > 0.4 => no drift, corr < -0.1 => full drift
+          lipSyncDrift = clamp((0.4 - bestCorr) / 0.5, 0, 1);
         }
       }
 
       // ===== Composite trust score =====
       let score = 100;
       const reasons: string[] = [];
+      const cfg = configRef.current;
 
       if (!faceDetected) {
         score = trustEMA.current.get() || 50;
       } else {
         // rPPG: low confidence after warmup => suspicious
-        if (gVals.length > 150) {
-          if (rppgConfidence < config.rppgConfidenceMin) {
-            score -= 35;
+        if (gVals.length > 120) {
+          if (rppgConfidence < cfg.rppgConfidenceMin) {
+            score -= 30;
             reasons.push("rPPG_FLAT");
-          } else if (rppgConfidence < config.rppgConfidenceMin * 2) {
-            score -= 15;
+          } else if (rppgConfidence < cfg.rppgConfidenceMin * 2) {
+            score -= 12;
           }
-          if (bpm < 45 || bpm > 180) {
-            score -= 10;
+          if (bpm > 0 && (bpm < 45 || bpm > 180)) {
+            score -= 8;
           }
         }
-        // Blinks: humans blink 12–20 / min normally
-        if (earSeries.current.length > 200) {
-          if (blinkRatePerMin < config.blinkLowThresh) {
-            score -= 25;
+        
+        // Blinks: humans blink 12–20/min normally
+        if (earSeries.current.length > 150) {
+          if (blinkRatePerMin < cfg.blinkLowThresh && blinkWinSec > 8) {
+            // Only flag after 8+ seconds of low blinks to avoid false positives during warmup
+            score -= 22;
             reasons.push("BLINK_LOW");
-          } else if (blinkRatePerMin > config.blinkHighThresh) {
-            score -= 10;
+          } else if (blinkRatePerMin > cfg.blinkHighThresh) {
+            score -= 8;
             reasons.push("BLINK_ERRATIC");
           }
         }
+        
         // Lip sync
-        if (lipSyncDrift > config.lipSyncDriftMax) {
-          score -= 25;
+        if (lipSyncDrift > cfg.lipSyncDriftMax) {
+          score -= 22;
           reasons.push("LIP_DRIFT");
-        } else if (lipSyncDrift > config.lipSyncDriftMax - 0.2) {
-          score -= 10;
+        } else if (lipSyncDrift > cfg.lipSyncDriftMax - 0.2) {
+          score -= 8;
         }
+        
         // EAR variance: deepfakes often have static eyes
         const earVals = earSeries.current.getValues();
-        if (earVals.length > 200) {
+        if (earVals.length > 150) {
           const v = std(earVals);
-          if (v < 0.008) {
-            score -= 15;
+          if (v < 0.006) {
+            score -= 12;
             reasons.push("STATIC_EYES");
           }
         }
         
-        // Head Pose Rigidity
+        // Head Pose Rigidity — use realistic threshold
         const nx = noseSeriesX.current.getValues();
         const ny = noseSeriesY.current.getValues();
         if (nx.length > 90) {
           const varX = std(nx);
           const varY = std(ny);
-          // If the face moves less than 0.05% of the screen width/height over 3 seconds
-          if (varX < 0.0005 && varY < 0.0005) {
-             score -= 25;
+          // 0.001 in normalized coords = 0.1% of screen = ~0.6px on 640px
+          // A real human sitting still will have micro-movements above this
+          if (varX < 0.001 && varY < 0.001) {
+             score -= 20;
              reasons.push("HEAD_STATIC");
           }
         }
@@ -522,6 +563,12 @@ export function useMirrorBreaker(config: TuningConfig = DEFAULT_CONFIG) {
       if (smoothed < 40)
         pushAlert("critical", "DEEPFAKE", "DEEPFAKE PROBABILITY HIGH.");
 
+      // Throttle UI updates to ~15fps to prevent React render storms
+      // Detection still runs every frame for accuracy
+      const uiDt = now - lastUIUpdate.current;
+      if (uiDt < 66) return; // 66ms = ~15fps UI updates
+      lastUIUpdate.current = now;
+
       // Window for plotting (downsample to 128)
       const plot = (() => {
         const arr = greenSeries.current.getValues();
@@ -532,7 +579,12 @@ export function useMirrorBreaker(config: TuningConfig = DEFAULT_CONFIG) {
         return out;
       })();
 
-      setSignals({
+      // Only create new alerts array when alerts actually changed
+      const currentAlertCount = alertsRef.current.length;
+      const alertsChanged = currentAlertCount !== alertCountRef.current;
+      alertCountRef.current = currentAlertCount;
+
+      setSignals((prev) => ({
         initialized: true,
         running: true,
         faceDetected,
@@ -546,10 +598,10 @@ export function useMirrorBreaker(config: TuningConfig = DEFAULT_CONFIG) {
         audioActive,
         trustScore: smoothed,
         threatLevel,
-        alerts: alertsRef.current.slice(),
+        alerts: alertsChanged ? alertsRef.current.slice() : prev.alerts,
         faceBox,
         foreheadBox,
-      });
+      }));
     };
     rafRef.current = requestAnimationFrame(tick);
   }, [pushAlert]);

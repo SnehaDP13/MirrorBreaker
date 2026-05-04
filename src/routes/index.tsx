@@ -39,6 +39,31 @@ export const Route = createFileRoute("/")({
 });
 
 function Index() {
+  // This app requires camera/mic — it can only run in the browser.
+  // Defer to client-side rendering to avoid SSR hydration mismatches
+  // that break React event handlers.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+
+  if (!mounted) {
+    return (
+      <div className="min-h-screen text-foreground flex items-center justify-center">
+        <div className="text-center space-y-4">
+          <div className="text-2xl font-bold tracking-wider text-glow-green">
+            MIRROR<span className="text-accent text-glow-cyan">BREAKER</span>
+          </div>
+          <div className="text-sm text-muted-foreground animate-pulse-glow">
+            Initializing detection engine…
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return <IndexApp />;
+}
+
+function IndexApp() {
   const [config, setConfig] = useState<TuningConfig>(() => {
     try {
       const saved = localStorage.getItem("mb-tuning");
@@ -55,15 +80,17 @@ function Index() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [allAlerts, setAllAlerts] = useState<AlertEvent[]>([]);
   const [maxThreat, setMaxThreat] = useState<number>(0);
-
+  // Track new alerts by count (signals.alerts is a new array ref on every frame)
+  const alertCount = signals.alerts.length;
   useEffect(() => {
-    if (!signals.running) return;
+    if (!signals.running || alertCount === 0) return;
     setAllAlerts((prev) => {
       const newAlerts = signals.alerts.filter((a) => !prev.some((p) => p.id === a.id));
       if (newAlerts.length === 0) return prev;
       return [...prev, ...newAlerts.reverse()];
     });
-  }, [signals.alerts, signals.running]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [alertCount, signals.running]);
 
   useEffect(() => {
     if (!signals.running) return;
@@ -186,7 +213,7 @@ function Index() {
               <span className="text-primary text-glow-green">●</span> SECURE_CHANNEL
             </div>
             <div className="hidden md:block">UPTIME {fmtUp(uptime)}</div>
-            <div>
+            <div suppressHydrationWarning>
               {new Date().toLocaleDateString("en-GB", {
                 year: "numeric",
                 month: "short",

@@ -24,6 +24,12 @@ async function build() {
       "@": path.join(process.cwd(), "src"),
     },
   });
+
+  // Copy static files
+  const fs = await import("fs");
+  fs.copyFileSync(path.join(EXTENSION_DIR, "manifest.json"), path.join(DIST_DIR, "manifest.json"));
+  fs.copyFileSync(path.join(EXTENSION_DIR, "iframe.html"), path.join(DIST_DIR, "iframe.html"));
+  console.log("Static files copied to dist.");
 }
 
 build().catch(() => process.exit(1));
